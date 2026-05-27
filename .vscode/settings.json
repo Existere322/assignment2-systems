@@ -1,0 +1,15 @@
+{
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true, 
+    "terminal.integrated.env.linux": {
+        "HTTP_PROXY": "http://127.0.0.1:43187",
+        "HTTPS_PROXY": "http://127.0.0.1:43187",
+        "http_proxy": "http://127.0.0.1:43187",
+        "https_proxy": "http://127.0.0.1:43187",
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "no_proxy": "localhost,127.0.0.1,::1"
+    }
+}

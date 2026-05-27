@@ -1,0 +1,105 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Transformer Training",
+            "type": "debugpy",
+            "request": "launch",
+
+            // 如果你的训练入口就是当前打开的文件，用 ${file}
+            // 如果入口固定是 train.py，可以改成 "${workspaceFolder}/train.py"
+            "program": "${file}",
+
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+
+            // 关键：选择使用哪张 GPU
+            // 例如选择 2，则等价于命令行：
+            // CUDA_VISIBLE_DEVICES=2 python train.py ...
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "${input:gpuId}",
+                "PYTHONUNBUFFERED": "1"
+            },
+
+            "args": [
+                // model
+                // "--vocab_size", "32000",
+                // "--context_length", "256",
+                // "--batch_size", "128",
+                // "--num_layers", "4",
+                // "--num_heads", "16",
+                // "--d_ff", "1344",
+                // "--d_model", "512",
+                // "--rope_theta", "10000.0",
+
+                // // optimizer
+                // "--weight_decay", "0.1",
+                // "--betas", "0.9", "0.95",
+                // "--eps", "1e-8",
+
+                // // training
+                // "--max_learning_rate", "2e-3",
+                // "--min_learning_rate", "2e-4",
+                // "--warmup_iters", "1000",
+                // "--cosine_cycle_iters", "9600",
+                // batch_size * total_step_count * context_length = 327680000
+                // "--end_iter", "10000",
+                // "--grad_clip_norm", "1.0",
+                // "--val_interval", "1000",
+                // "--val_batches", "50",
+                // "--device", "cuda",
+                // "--seed", "336",
+                // "--dtype", "${input:dtype}",
+
+                // IO
+                // "--step_to_save", "1000",
+                // "--save_N", "100",
+                // "--train_path", "${workspaceFolder}/train_path/owt_train.bin",
+                // "--val_path", "${workspaceFolder}/valid_path/owt_valid.bin",
+                // "--save_position", "${workspaceFolder}/save_position",
+                // "--log_path", "${workspaceFolder}/log_position",
+                // "--log_interval", "100",
+                // "--max_token_num", "512",
+                // "--user_prompt", "hello ! you should listen to me about this interesting story!",
+                // "--temperature", "0.5",
+                // "--sampling_prob", "0.8"
+
+                // Profiling
+                "--profiling_warmup", "1"
+            ]
+        }
+    ],
+
+    "inputs": [
+        {
+            "id": "gpuId",
+            "type": "pickString",
+            "description": "Select GPU for CUDA_VISIBLE_DEVICES",
+            "options": [
+                "0",
+                "1",
+                "2",
+                "3"
+            ],
+            "default": "0"
+        },
+        {
+            "id": "dtype",
+            "type": "pickString",
+            "description": "Select training dtype",
+            "options": [
+                "float32",
+                "float16",
+                "bfloat16"
+            ],
+            "default": "float32"
+        },
+        {
+            "id": "userPrompt",
+            "type": "promptString",
+            "description": "Prompt used for generation/debugging",
+            "default": "hello"
+        }
+    ]
+}

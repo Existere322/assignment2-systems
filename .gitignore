@@ -11,6 +11,8 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+nsys/
+nsys_profiles/
 .Python
 build/
 develop-eggs/

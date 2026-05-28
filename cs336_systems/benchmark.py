@@ -8,6 +8,33 @@ import random
 import os
 import json
 
+# CUDA_VISIBLE_DEVICES=0
+# uv run nsys profile -- python benchmark.py
+# uv run nsys profile -- python benchmark.py --profile_attn=1
+# uv run nsys profile --trace=cuda,cudnn,cublas,osrt,nvtx --pytorch=functions-trace,autogradshapes-nvtx --cudabacktrace=all --python-backtrace=cuda --gpu-metrics-devices=0 -- python benchmark.py --profile_attn=1
+"""
+前置条件：
+export CUDA_VISIBLE_DEVICES=0
+export PATH="/home/huiwei/fy/zhangshuai/assignment2-systems/nsys/extract/opt/nvidia/nsight-systems-cli/2026.3.1/target-linux-x64:$PATH"
+
+
+uv run nsys profile \
+  --trace=cuda,cudnn,cublas,osrt,nvtx \
+  --pytorch=functions-trace,autograd-shapes-nvtx \
+  --cudabacktrace=all \
+  --python-backtrace=cuda \
+  -- python benchmark.py --profile_attn 1
+
+uv run nsys profile \
+  -o report_attn \
+  -f true \
+  --trace=cuda,cudnn,cublas,osrt,nvtx \
+  --pytorch=functions-trace,autograd-shapes-nvtx \
+  --cudabacktrace=kernel,sync \
+  --python-backtrace=cuda \
+  -- python benchmark.py --profile_attn 1
+
+"""
 def parse_args():
     p = argparse.ArgumentParser()
     g_model = p.add_argument_group("model")
@@ -43,6 +70,7 @@ def parse_args():
     g_profiling.add_argument("--warmup_steps", type=int, default=5)
     g_profiling.add_argument("--profiling_steps", type=int, default=10)
     g_profiling.add_argument("--profiling_warmup", type=int, default=0)
+    g_profiling.add_argument("--profile_attn", type=int, default=0)
 
     return p.parse_args()
     
@@ -102,12 +130,13 @@ def main(args):
     random.seed(args.seed)
     warmup_steps = args.warmup_steps
     profiling_steps = args.profiling_steps
+    profile_attn = False if args.profile_attn == 0 else True
 
     transformer_model = BasicsTransformerLM(vocab_size,
                                         context_length,
                                         d_model, num_layers,
                                         num_heads, d_ff,
-                                        rope_theta)
+                                        rope_theta, profile_attn)
     transformer_model.to(device)
     
     optimizer = AdamW(transformer_model.parameters(), args.max_learning_rate)

@@ -6,6 +6,7 @@ import torch
 import numpy as np
 import random
 import os
+import torch.cuda.nvtx as nvtx
 import json
 
 # CUDA_VISIBLE_DEVICES=0
@@ -107,7 +108,7 @@ def cross_entropy(inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
     return result
 
-    
+@nvtx.range("main process")
 def main(args):
     vocab_size = args.vocab_size
     context_length = args.context_length
@@ -132,42 +133,56 @@ def main(args):
     profiling_steps = args.profiling_steps
     profile_attn = False if args.profile_attn == 0 else True
 
-    transformer_model = BasicsTransformerLM(vocab_size,
-                                        context_length,
-                                        d_model, num_layers,
-                                        num_heads, d_ff,
-                                        rope_theta, profile_attn)
-    transformer_model.to(device)
+    with nvtx.range("define model"):
+        transformer_model = BasicsTransformerLM(vocab_size,
+                                            context_length,
+                                            d_model, num_layers,
+                                            num_heads, d_ff,
+                                            rope_theta, profile_attn)
+        transformer_model.to(device)
     
-    optimizer = AdamW(transformer_model.parameters(), args.max_learning_rate)
+        optimizer = AdamW(transformer_model.parameters(), args.max_learning_rate)
 
     log_file = open(os.path.join(os.path.dirname(__file__), "profiling_results/profiling.jsonl"), "a")
     log_file.write(json.dumps({**vars(args)}) + "\n")
     log_file.flush()
 
-
+    
     for t in range(0, args.end_iter):
+        nvtx.range_push(f"training_step: {t}")
         step = t + 1
         lr = get_cosine_lr(step, max_learning_rate, args.min_learning_rate, args.warmup_iters, args.cosine_cycle_iters)
         for g in optimizer.param_groups:
             g["lr"] = lr
         x, y = generate_random_data(batch_size, context_length, vocab_size, device)
-
+        
+        # forward pass process
         time_start = timeit.default_timer()
-        logits = transformer_model(x)
-        loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
-        # view(-1, logits.size(-1)) 前一个 -1 表示由 pytorch 自行推断维度，最后一个表示最后一维度的数量
-        # 将 batch_size, seq_len, vocab_size 的结果转变为 batch_size * seq_len, vocab_size 的维度
+        with nvtx.range("forward_pass"):
+            logits = transformer_model(x)
         torch.cuda.synchronize()  
         time_after_forward = timeit.default_timer()
         forward_time = time_after_forward - time_start
+
+        with nvtx.range("loss_compute"):
+            loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
+        torch.cuda.synchronize()
+        time_after_loss = timeit.default_timer()
+        loss_time = time_after_loss - time_after_forward
+        # loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
+        # view(-1, logits.size(-1)) 前一个 -1 表示由 pytorch 自行推断维度，最后一个表示最后一维度的数量
+        # 将 batch_size, seq_len, vocab_size 的结果转变为 batch_size * seq_len, vocab_size 的维度
         
-        loss.backward()
+        # backward pass process
+        with nvtx.range("backward_pass"):
+            loss.backward()
         torch.cuda.synchronize()  
         time_after_backward = timeit.default_timer()
         backward_time = time_after_backward - time_after_forward
 
-        optimizer.step()
+        # optimizer process
+        with nvtx.range("optimizer"):
+            optimizer.step()
         torch.cuda.synchronize()  
         time_after_step = timeit.default_timer()
         step_time = time_after_step - time_after_backward
@@ -175,12 +190,16 @@ def main(args):
         torch.cuda.synchronize()  
         # Wait for all kernels in all streams on a CUDA device to complete.
         # In this case, the time we measured is the time of forward plus backward and optimizer update
+        nvtx.range_pop()
+
+        # profiling control
         if step > warmup_steps + profiling_steps:
             exit(0)
 
         if step > warmup_steps or args.profiling_warmup == 1:
             log_file.write(json.dumps({"step": step, "forward_time": forward_time, 
-                                       "backward_time": backward_time, "step_time": step_time}) + "\n")
+                                    "backward_time": backward_time, "step_time": step_time,
+                                    "loss_compute_time": loss_time},) + "\n")
             log_file.flush()
 
 

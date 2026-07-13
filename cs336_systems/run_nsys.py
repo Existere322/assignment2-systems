@@ -19,9 +19,11 @@ BATCH_SIZE = 64
 VOCAB_SIZE = 10000
 ROPE_THETA = 10000.0
 DTYPE = "float32"
+PATH = "/home/huiwei/fy/zhangshuai/assignment2-systems/nsys/extract/opt/nvidia/nsight-systems-cli/2026.3.1/target-linux-x64:$PATH"
+NSYS_DIR = "/home/huiwei/fy/zhangshuai/assignment2-systems/nsys/extract/opt/nvidia/nsight-systems-cli/2026.3.1/target-linux-x64"
 
 WARMUP_STEPS = 5
-PROFILING_STEPS = 10
+PROFILING_STEPS = 15
 
 # 如果你想严格满足题目 "context lengths larger than 128"，
 # 建议把 ctx=128 的两组改成 ctx=1024，只要显存放得下。
@@ -29,10 +31,9 @@ CONFIGS = [
     {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 128},
     {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 256},
     {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 512},
-
+    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 64},
     {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 128},
     {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 256},
-    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 512},
 ]
 
 
@@ -116,8 +117,8 @@ def run_one_profile(cfg: dict) -> dict:
     run_id = make_run_id(cfg)
     report_base = REPORT_DIR / run_id
     report_file = REPORT_DIR / f"{run_id}.nsys-rep"
-    sqlite_file = REPORT_DIR / f"{run_id}.sqlite"
-    stdout_file = LOG_DIR / f"{run_id}.stdout.txt"
+    # sqlite_file = REPORT_DIR / f"{run_id}.sqlite"
+    # stdout_file = LOG_DIR / f"{run_id}.stdout.txt"
     stderr_file = LOG_DIR / f"{run_id}.stderr.txt"
     per_run_jsonl = LOG_DIR / f"{run_id}.profiling.jsonl"
 
@@ -165,16 +166,15 @@ def run_one_profile(cfg: dict) -> dict:
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = GPU_ID
+    env["PATH"] = f"{NSYS_DIR}:{env['PATH']}"
 
     print(f"\n========== Running {run_id} ==========")
     print(" ".join(cmd))
-
-    with stdout_file.open("w", encoding="utf-8") as out, stderr_file.open("w", encoding="utf-8") as err:
+    with stderr_file.open("w", encoding="utf-8") as err:
         completed = subprocess.run(
             cmd,
             cwd=PROJECT_ROOT,
             env=env,
-            stdout=out,
             stderr=err,
             text=True,
         )
@@ -201,8 +201,6 @@ def run_one_profile(cfg: dict) -> dict:
         "profiling_steps": PROFILING_STEPS,
 
         "nsys_report": str(report_file),
-        "nsys_sqlite": str(sqlite_file),
-        "stdout_log": str(stdout_file),
         "stderr_log": str(stderr_file),
         "benchmark_jsonl": str(per_run_jsonl),
 

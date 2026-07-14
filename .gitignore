@@ -13,6 +13,7 @@ __pycache__/
 # Distribution / packaging
 nsys/
 cs336_systems/nsys_profiles/
+cs336_systems/profiling_results/
 .Python
 build/
 develop-eggs/

@@ -8,6 +8,7 @@ import random
 import os
 import torch.cuda.nvtx as nvtx
 import json
+from contextlib import nullcontext
 
 # CUDA_VISIBLE_DEVICES=0
 # uv run nsys profile -- python benchmark.py
@@ -72,6 +73,7 @@ def parse_args():
     g_profiling.add_argument("--profiling_steps", type=int, default=10)
     g_profiling.add_argument("--profiling_warmup", type=int, default=0)
     g_profiling.add_argument("--profile_attn", type=int, default=0)
+    g_profiling.add_argument("--use_mixed_precision", type=int, default=0)
 
     return p.parse_args()
     
@@ -147,6 +149,14 @@ def main(args):
     log_file.write(json.dumps({**vars(args)}) + "\n")
     log_file.flush()
 
+    use_bf16 = True if args.use_mixed_precision == 1 else False
+
+    if use_bf16:
+        ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    else:
+        ctx = nullcontext()
+    # use nullcontext manager to determine whether use mixed_precision
+
     
     for t in range(0, args.end_iter):
         nvtx.range_push(f"training_step: {t}")
@@ -164,16 +174,19 @@ def main(args):
         time_after_forward = timeit.default_timer()
         forward_time = time_after_forward - time_start
 
-        with nvtx.range("loss_compute"):
-            loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
-        torch.cuda.synchronize()
-        time_after_loss = timeit.default_timer()
-        loss_time = time_after_loss - time_after_forward
-        # loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
-        # view(-1, logits.size(-1)) 前一个 -1 表示由 pytorch 自行推断维度，最后一个表示最后一维度的数量
-        # 将 batch_size, seq_len, vocab_size 的结果转变为 batch_size * seq_len, vocab_size 的维度
-        
-        # backward pass process
+        # Only forward and loss in the ctx context
+        with ctx:
+            with nvtx.range("loss_compute"):
+                loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
+            torch.cuda.synchronize()
+            time_after_loss = timeit.default_timer()
+            loss_time = time_after_loss - time_after_forward
+            # loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
+            # view(-1, logits.size(-1)) 前一个 -1 表示由 pytorch 自行推断维度，最后一个表示最后一维度的数量
+            # 将 batch_size, seq_len, vocab_size 的结果转变为 batch_size * seq_len, vocab_size 的维度
+            
+            # backward pass process
+
         with nvtx.range("backward_pass"):
             loss.backward()
         torch.cuda.synchronize()  

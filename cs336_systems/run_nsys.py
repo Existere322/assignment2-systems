@@ -15,28 +15,27 @@ import pandas as pd
 # =========================
 
 GPU_ID = "0"
-BATCH_SIZE = 24
 VOCAB_SIZE = 10000
 ROPE_THETA = 10000.0
 DTYPE = "float32"
 WARMUP_STEPS = 5
 PROFILING_STEPS = 15
-MIXED_PRECISION = False
+MIXED_PRECISION = True
+MEMORY_PROFILING = False
 
 # CPU/CUDA backtraces require both perf_event_open permission and access to a
 # symbol server. Keep them disabled by default because this machine currently
 # has perf_event_paranoid=4 and cannot reach debuginfod.ubuntu.com.
 ENABLE_BACKTRACES = False
 
-# 如果你想严格满足题目 "context lengths larger than 128"，
-# 建议把 ctx=128 的两组改成 ctx=1024，只要显存放得下。
 CONFIGS = [
-    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 128},
-    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 256},
-    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 512},
-    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 64},
-    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 128},
-    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 256},
+    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 128, "batch_size": 4},
+    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 256, "batch_size": 4},
+    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 512, "batch_size": 4},
+    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 128, "batch_size": 4},
+    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 256, "batch_size": 4},
+    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 512, "batch_size": 4},
+    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 2048, "batch_size": 4},
 ]
 
 
@@ -49,6 +48,7 @@ BENCHMARK = PROJECT_ROOT / "benchmark.py"
 
 OUT_DIR = PROJECT_ROOT / "nsys_profiles"
 REPORT_DIR = OUT_DIR / "reports"
+if MIXED_PRECISION: REPORT_DIR = OUT_DIR / "reports_mixed_precision"
 LOG_DIR = OUT_DIR / "logs"
 
 BENCHMARK_LOG_DIR = PROJECT_ROOT / "profiling_results"
@@ -66,7 +66,7 @@ def make_run_id(cfg: dict) -> str:
         f"_L{cfg['num_layers']}"
         f"_H{cfg['num_heads']}"
         f"_ctx{cfg['context_length']}"
-        f"_bs{BATCH_SIZE}"
+        f"_bs{cfg['batch_size']}"
     )
 
 
@@ -112,9 +112,6 @@ def parse_python_timing(log_file: Path) -> dict:
         "num_profiled_steps": len(step_rows),
     }
 
-
-if MIXED_PRECISION:
-    REPORT_DIR = OUT_DIR / "reports_mixed_precision"
 
 def run_one_profile(cfg: dict) -> dict:
     run_id = make_run_id(cfg)
@@ -163,7 +160,7 @@ def run_one_profile(cfg: dict) -> dict:
         "python", str(BENCHMARK),
 
         "--vocab_size", str(VOCAB_SIZE),
-        "--batch_size", str(BATCH_SIZE),
+        "--batch_size", str(cfg["batch_size"]),
         "--context_length", str(cfg["context_length"]),
         "--d_model", str(cfg["d_model"]),
         "--d_ff", str(cfg["d_ff"]),
@@ -177,7 +174,8 @@ def run_one_profile(cfg: dict) -> dict:
 
         # 让模型内部 attention 相关 profiling / NVTX 标记打开，前提是你的 BasicsTransformerLM 使用了它。
         "--profile_attn", "1",
-        "--use_mixed_precision", 1 if MIXED_PRECISION else 0
+        "--use_mixed_precision", str(1 if MIXED_PRECISION else 0), 
+        "--use_memory_profiling", str(1 if MEMORY_PROFILING else 0), 
     ]
 
     env = os.environ.copy()

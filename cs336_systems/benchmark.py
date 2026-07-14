@@ -74,6 +74,7 @@ def parse_args():
     g_profiling.add_argument("--profiling_warmup", type=int, default=0)
     g_profiling.add_argument("--profile_attn", type=int, default=0)
     g_profiling.add_argument("--use_mixed_precision", type=int, default=0)
+    g_profiling.add_argument("--use_memory_profiling", type=int, default=0)
 
     return p.parse_args()
     
@@ -150,14 +151,17 @@ def main(args):
     log_file.flush()
 
     use_bf16 = True if args.use_mixed_precision == 1 else False
+    memory_profiling = True if args.use_memory_profiling == 1 else False
 
     if use_bf16:
-        ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        mixed_precision = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     else:
-        ctx = nullcontext()
+        mixed_precision = nullcontext()
     # use nullcontext manager to determine whether use mixed_precision
 
-    
+    if memory_profiling:
+        torch.cuda.memory._record_memory_history(max_entries=1000000)  # start recording the memory usage 
+
     for t in range(0, args.end_iter):
         nvtx.range_push(f"training_step: {t}")
         step = t + 1
@@ -165,17 +169,20 @@ def main(args):
         for g in optimizer.param_groups:
             g["lr"] = lr
         x, y = generate_random_data(batch_size, context_length, vocab_size, device)
-        
-        # forward pass process
-        time_start = timeit.default_timer()
-        with nvtx.range("forward_pass"):
-            logits = transformer_model(x)
-        torch.cuda.synchronize()  
-        time_after_forward = timeit.default_timer()
-        forward_time = time_after_forward - time_start
 
+        with mixed_precision:
         # Only forward and loss in the ctx context
-        with ctx:
+
+            # forward pass process
+            torch.cuda.synchronize()  
+            time_start = timeit.default_timer()
+            with nvtx.range("forward_pass"):
+                logits = transformer_model(x)
+            torch.cuda.synchronize()  
+            time_after_forward = timeit.default_timer()
+            forward_time = time_after_forward - time_start
+            
+            # loss compute
             with nvtx.range("loss_compute"):
                 loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
             torch.cuda.synchronize()
@@ -185,25 +192,29 @@ def main(args):
             # view(-1, logits.size(-1)) 前一个 -1 表示由 pytorch 自行推断维度，最后一个表示最后一维度的数量
             # 将 batch_size, seq_len, vocab_size 的结果转变为 batch_size * seq_len, vocab_size 的维度
             
-            # backward pass process
-
+        # backward pass process
+        # the backward pass is determined by the forward pass result
+        # so it's no need to put it in the context of mixed_precision
         with nvtx.range("backward_pass"):
             loss.backward()
         torch.cuda.synchronize()  
         time_after_backward = timeit.default_timer()
-        backward_time = time_after_backward - time_after_forward
+        backward_time = time_after_backward - time_after_loss
 
         # optimizer process
         with nvtx.range("optimizer"):
             optimizer.step()
         torch.cuda.synchronize()  
         time_after_step = timeit.default_timer()
-        step_time = time_after_step - time_after_backward
+        optimizer_time = time_after_step - time_after_backward
         optimizer.zero_grad()
         torch.cuda.synchronize()  
         # Wait for all kernels in all streams on a CUDA device to complete.
         # In this case, the time we measured is the time of forward plus backward and optimizer update
         nvtx.range_pop()
+
+        if memory_profiling:
+            torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")  # save the memory usage results
 
         # profiling control
         if step > warmup_steps + profiling_steps:
@@ -211,9 +222,12 @@ def main(args):
 
         if step > warmup_steps or args.profiling_warmup == 1:
             log_file.write(json.dumps({"step": step, "forward_time": forward_time, 
-                                    "backward_time": backward_time, "step_time": step_time,
+                                    "backward_time": backward_time, "optimizer_time": optimizer_time,
                                     "loss_compute_time": loss_time},) + "\n")
             log_file.flush()
+
+    if memory_profiling:
+        torch.cuda.memory._record_memory_history(enabled=None)      # end the recording process
 
 
 if __name__ == "__main__": main(parse_args())

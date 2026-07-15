@@ -13,6 +13,7 @@ import torch.nn as nn
 from einops import einsum, rearrange
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from cs336_basics.nn_utils import softmax
 
@@ -188,6 +189,8 @@ class BasicsTransformerLM(nn.Module):
         d_ff: int,
         rope_theta: float | None = 10_000.0,
         profile_attn: bool = False, 
+        use_checkpoints: bool = False, 
+        checkpoint_every_n_layers: int = 1, 
     ):
         # Store the model configuration for serialization / deserialization
         self.config = {
@@ -201,6 +204,8 @@ class BasicsTransformerLM(nn.Module):
         self.positional_encoder = (
             RotaryEmbedding(context_length, d_head, rope_theta) if rope_theta is not None else None
         )
+        self.use_checkpoints = use_checkpoints
+        self.checkpoint_every_n_layers = checkpoint_every_n_layers
 
         self.layers = nn.ModuleList(
             [
@@ -251,9 +256,30 @@ class BasicsTransformerLM(nn.Module):
         # x = self.positional_encoder(embedded_tokens, positions)
         x = embedded_tokens
 
-        for layer in self.layers:
-            # (batch size, sequence_length, d_model)
-            x = layer(x)
+        if not self.use_checkpoints:
+            for layer in self.layers:
+                x = layer(x)
+
+        else:
+            n = len(self.layers)
+
+            for start in range(0, n, self.checkpoint_every_n_layers):
+
+                end = min(
+                    start + self.checkpoint_every_n_layers,
+                    n
+                )
+
+                def run_layers(x, start=start, end=end):
+                    for i in range(start, end):
+                        x = self.layers[i](x)
+                    return x
+
+                x = checkpoint(
+                    run_layers,
+                    x,
+                    use_reentrant=False
+                )
         # (batch size, sequence_length, d_model)
         x = self.ln_final(x)
         # (batch size, sequence_length, vocab_size)
@@ -332,7 +358,7 @@ class BasicsTransformerLM(nn.Module):
                 state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
         model.load_state_dict(state_dict)
         return model
-
+    
 
 class TransformerBlock(nn.Module):
     """A single Transformer layer.

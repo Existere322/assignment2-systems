@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from statistics import mean
+from torch.utils.checkpoint import checkpoint
 
 import pandas as pd
 
@@ -20,9 +21,9 @@ ROPE_THETA = 10000.0
 DTYPE = "float32"
 WARMUP_STEPS = 5
 PROFILING_STEPS = 15
-MIXED_PRECISION = True
+MIXED_PRECISION = False
 MEMORY_PROFILING = True
-INFERENCE_ONLY = True
+INFERENCE_ONLY = False
 
 # CPU/CUDA backtraces require both perf_event_open permission and access to a
 # symbol server. Keep them disabled by default because this machine currently
@@ -150,6 +151,7 @@ def run_one_profile(cfg: dict) -> dict:
 
         "--trace=cuda,cudnn,cublas,osrt,nvtx",
         # "--pytorch=functions-trace,autograd-shapes-nvtx",
+        # "--cuda-memory-usage=true", 
 
         *profiling_options,
 
@@ -175,11 +177,14 @@ def run_one_profile(cfg: dict) -> dict:
         "--profile_attn", "1",
         "--use_mixed_precision", str(1 if MIXED_PRECISION else 0), 
         "--use_memory_profiling", str(1 if MEMORY_PROFILING else 0), 
-        "--run_mode", run_mode
+        "--run_mode", run_mode, 
+        "--use_checkpoints", "1", 
+        "--per_checkpoint_layers", "1", 
     ]
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = GPU_ID
+    # env["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"  # 其他实验可以关闭
     if not ENABLE_BACKTRACES:
         # DEBUGINFOD_URLS enables remote debug-symbol downloads. Removing it is
         # a second guard against blocking in debuginfod when symbols are off.

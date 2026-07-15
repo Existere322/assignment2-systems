@@ -1,5 +1,6 @@
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.optimizer import get_cosine_lr, AdamW
+from torch.utils.checkpoint import checkpoint
 import timeit
 import argparse
 import torch
@@ -76,6 +77,8 @@ def parse_args():
     g_profiling.add_argument("--use_mixed_precision", type=int, default=0)
     g_profiling.add_argument("--use_memory_profiling", type=int, default=0)
     g_profiling.add_argument("--run_mode", choices=["inference", "train"], default="train")
+    g_profiling.add_argument("--use_checkpoints", type=int, default=0)
+    g_profiling.add_argument("--per_checkpoint_layers", type=int, default=1)
 
     return p.parse_args()
     
@@ -139,13 +142,16 @@ def main(args):
     profiling_steps = args.profiling_steps
     profile_attn = False if args.profile_attn == 0 else True
     inference_only = args.run_mode == "inference"
+    use_checkpoints = args.use_checkpoints == 1
+    per_checkpoint_layers = args.per_checkpoint_layers
 
     with nvtx.range("define model"):
         transformer_model = BasicsTransformerLM(vocab_size,
                                             context_length,
                                             d_model, num_layers,
                                             num_heads, d_ff,
-                                            rope_theta, profile_attn)
+                                            rope_theta, profile_attn, 
+                                            use_checkpoints, per_checkpoint_layers)
         transformer_model.to(device)
         if inference_only:
             transformer_model.eval()

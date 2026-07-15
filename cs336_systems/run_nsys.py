@@ -21,7 +21,8 @@ DTYPE = "float32"
 WARMUP_STEPS = 5
 PROFILING_STEPS = 15
 MIXED_PRECISION = True
-MEMORY_PROFILING = False
+MEMORY_PROFILING = True
+INFERENCE_ONLY = True
 
 # CPU/CUDA backtraces require both perf_event_open permission and access to a
 # symbol server. Keep them disabled by default because this machine currently
@@ -29,13 +30,15 @@ MEMORY_PROFILING = False
 ENABLE_BACKTRACES = False
 
 CONFIGS = [
-    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 128, "batch_size": 4},
-    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 256, "batch_size": 4},
-    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 512, "batch_size": 4},
-    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 128, "batch_size": 4},
-    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 256, "batch_size": 4},
-    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 512, "batch_size": 4},
-    {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 2048, "batch_size": 4},
+    # {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 128, "batch_size": 4},
+    # {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 256, "batch_size": 4},
+    # {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 512, "batch_size": 4},
+    # {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12, "context_length": 1024, "batch_size": 4}, # 1,391,569,403,904
+    # {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 128, "batch_size": 4},
+    # {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 256, "batch_size": 4},
+    {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 512, "batch_size": 4}, # 3,298,534,883,328
+    # {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16, "context_length": 1024, "batch_size": 4}, 
+    # {"d_model": 2560, "d_ff": 10240, "num_layers": 32, "num_heads": 32, "context_length": 32, "batch_size": 4}    # 3,435,973,836,800
 ]
 
 
@@ -43,16 +46,16 @@ CONFIGS = [
 # Paths
 # =========================
 
+mixed_precision_re = "bf16" if MIXED_PRECISION else "fp32"
+run_mode = "inference" if INFERENCE_ONLY else "train"
 PROJECT_ROOT = Path(__file__).resolve().parent
 BENCHMARK = PROJECT_ROOT / "benchmark.py"
 
 OUT_DIR = PROJECT_ROOT / "nsys_profiles"
-REPORT_DIR = OUT_DIR / "reports"
-if MIXED_PRECISION: REPORT_DIR = OUT_DIR / "reports_mixed_precision"
+REPORT_DIR = OUT_DIR / f"reports_{mixed_precision_re}_{run_mode}"
 LOG_DIR = OUT_DIR / "logs"
 
 BENCHMARK_LOG_DIR = PROJECT_ROOT / "profiling_results"
-BENCHMARK_LOG_FILE = BENCHMARK_LOG_DIR / "profiling.jsonl"
 
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -117,14 +120,10 @@ def run_one_profile(cfg: dict) -> dict:
     run_id = make_run_id(cfg)
     report_base = REPORT_DIR / run_id
     # stdout_file = LOG_DIR / f"{run_id}.stdout.txt"
-    stderr_file = LOG_DIR / f"{run_id}.stderr.txt"
-    per_run_jsonl = LOG_DIR / f"{run_id}.profiling.jsonl"
-
-    if MIXED_PRECISION:
-        stderr_file = LOG_DIR / f"{run_id}.stderr_mixed_precision.txt"
-        per_run_jsonl = LOG_DIR / f"{run_id}.profiling_mixed_precision.jsonl"
-
     # Isolate benchmark.py's own timing log for this run.
+    BENCHMARK_LOG_FILE = BENCHMARK_LOG_DIR / f"profiling_{cfg['d_model']}_{cfg['context_length']}_{cfg['num_layers']}_{mixed_precision_re}_{run_mode}.jsonl"
+    stderr_file = LOG_DIR / f"{run_id}.stderr_{mixed_precision_re}_{run_mode}.txt"
+    per_run_jsonl = LOG_DIR / f"{run_id}.profiling_{mixed_precision_re}_{run_mode}.jsonl"
     if BENCHMARK_LOG_FILE.exists():
         BENCHMARK_LOG_FILE.unlink()
 
@@ -150,7 +149,7 @@ def run_one_profile(cfg: dict) -> dict:
         "-f", "true",
 
         "--trace=cuda,cudnn,cublas,osrt,nvtx",
-        "--pytorch=functions-trace,autograd-shapes-nvtx",
+        # "--pytorch=functions-trace,autograd-shapes-nvtx",
 
         *profiling_options,
 
@@ -176,6 +175,7 @@ def run_one_profile(cfg: dict) -> dict:
         "--profile_attn", "1",
         "--use_mixed_precision", str(1 if MIXED_PRECISION else 0), 
         "--use_memory_profiling", str(1 if MEMORY_PROFILING else 0), 
+        "--run_mode", run_mode
     ]
 
     env = os.environ.copy()

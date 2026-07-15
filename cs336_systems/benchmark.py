@@ -75,6 +75,7 @@ def parse_args():
     g_profiling.add_argument("--profile_attn", type=int, default=0)
     g_profiling.add_argument("--use_mixed_precision", type=int, default=0)
     g_profiling.add_argument("--use_memory_profiling", type=int, default=0)
+    g_profiling.add_argument("--run_mode", choices=["inference", "train"], default="train")
 
     return p.parse_args()
     
@@ -122,6 +123,8 @@ def main(args):
     d_ff = args.d_ff
     rope_theta = args.rope_theta
     weight_decay = args.weight_decay
+    mixed_precision_re = "bf16" if args.use_mixed_precision == 1 else "fp32"
+    run_mode = args.run_mode
     [beta1, beta2] = args.betas
     eps =  args.eps
     max_learning_rate = args.max_learning_rate
@@ -135,6 +138,7 @@ def main(args):
     warmup_steps = args.warmup_steps
     profiling_steps = args.profiling_steps
     profile_attn = False if args.profile_attn == 0 else True
+    inference_only = args.run_mode == "inference"
 
     with nvtx.range("define model"):
         transformer_model = BasicsTransformerLM(vocab_size,
@@ -143,10 +147,14 @@ def main(args):
                                             num_heads, d_ff,
                                             rope_theta, profile_attn)
         transformer_model.to(device)
-    
-        optimizer = AdamW(transformer_model.parameters(), args.max_learning_rate)
+        if inference_only:
+            transformer_model.eval()
+            optimizer = None
+        else:
+            transformer_model.train()
+            optimizer = AdamW(transformer_model.parameters(), args.max_learning_rate)
 
-    log_file = open(os.path.join(os.path.dirname(__file__), "profiling_results/profiling.jsonl"), "a")
+    log_file = open(os.path.join(os.path.dirname(__file__), f"profiling_results/profiling_{d_model}_{context_length}_{num_layers}_{mixed_precision_re}_{run_mode}.jsonl"), "a")
     log_file.write(json.dumps({**vars(args)}) + "\n")
     log_file.flush()
 
@@ -159,66 +167,100 @@ def main(args):
         mixed_precision = nullcontext()
     # use nullcontext manager to determine whether use mixed_precision
 
+    memory_profiling_dir = os.path.join(os.path.dirname(__file__), "nsys_profiles", "memory_profiling")
     if memory_profiling:
+        os.makedirs(memory_profiling_dir, exist_ok=True)
         torch.cuda.memory._record_memory_history(max_entries=1000000)  # start recording the memory usage 
 
     for t in range(0, args.end_iter):
-        nvtx.range_push(f"training_step: {t}")
         step = t + 1
-        lr = get_cosine_lr(step, max_learning_rate, args.min_learning_rate, args.warmup_iters, args.cosine_cycle_iters)
-        for g in optimizer.param_groups:
-            g["lr"] = lr
-        x, y = generate_random_data(batch_size, context_length, vocab_size, device)
+        forward_time = 0
+        backward_time = 0
+        optimizer_time = 0
+        loss_time = 0
+        if inference_only:
+            # inference only mode
+            x = torch.randint(
+                0,
+                vocab_size,
+                size=(batch_size, context_length),
+                device=device,
+                dtype=torch.long,
+            )
 
-        with mixed_precision:
-        # Only forward and loss in the ctx context
+            amp_context = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if use_bf16
+                else nullcontext()
+            )
 
-            # forward pass process
-            torch.cuda.synchronize()  
-            time_start = timeit.default_timer()
-            with nvtx.range("forward_pass"):
-                logits = transformer_model(x)
-            torch.cuda.synchronize()  
-            time_after_forward = timeit.default_timer()
-            forward_time = time_after_forward - time_start
-            
-            # loss compute
-            with nvtx.range("loss_compute"):
-                loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
             torch.cuda.synchronize()
-            time_after_loss = timeit.default_timer()
-            loss_time = time_after_loss - time_after_forward
-            # loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
-            # view(-1, logits.size(-1)) 前一个 -1 表示由 pytorch 自行推断维度，最后一个表示最后一维度的数量
-            # 将 batch_size, seq_len, vocab_size 的结果转变为 batch_size * seq_len, vocab_size 的维度
-            
-        # backward pass process
-        # the backward pass is determined by the forward pass result
-        # so it's no need to put it in the context of mixed_precision
-        with nvtx.range("backward_pass"):
-            loss.backward()
-        torch.cuda.synchronize()  
-        time_after_backward = timeit.default_timer()
-        backward_time = time_after_backward - time_after_loss
+            time_start = timeit.default_timer()
 
-        # optimizer process
-        with nvtx.range("optimizer"):
-            optimizer.step()
-        torch.cuda.synchronize()  
-        time_after_step = timeit.default_timer()
-        optimizer_time = time_after_step - time_after_backward
-        optimizer.zero_grad()
-        torch.cuda.synchronize()  
-        # Wait for all kernels in all streams on a CUDA device to complete.
-        # In this case, the time we measured is the time of forward plus backward and optimizer update
-        nvtx.range_pop()
+            # Closing autograd graph
+            with torch.inference_mode(), amp_context:
+                with nvtx.range("forward_pass"):
+                    logits = transformer_model(x)
 
-        if memory_profiling:
-            torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")  # save the memory usage results
+            torch.cuda.synchronize()
+            forward_time = timeit.default_timer() - time_start
+
+            # 使输出和临时张量在下一轮前释放
+            del logits, x
+        
+        else:
+            nvtx.range_push(f"training_step: {t}")
+            lr = get_cosine_lr(step, max_learning_rate, args.min_learning_rate, args.warmup_iters, args.cosine_cycle_iters)
+            for g in optimizer.param_groups:
+                g["lr"] = lr
+            x, y = generate_random_data(batch_size, context_length, vocab_size, device)
+
+            with mixed_precision:
+            # Only forward and loss in the ctx context
+
+                # forward pass process
+                torch.cuda.synchronize()  
+                time_start = timeit.default_timer()
+                with nvtx.range("forward_pass"):
+                    logits = transformer_model(x)
+                torch.cuda.synchronize()  
+                time_after_forward = timeit.default_timer()
+                forward_time = time_after_forward - time_start
+                
+                # loss compute
+                with nvtx.range("loss_compute"):
+                    loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
+                torch.cuda.synchronize()
+                time_after_loss = timeit.default_timer()
+                loss_time = time_after_loss - time_after_forward
+                # loss = cross_entropy(logits.view(-1, logits.size(-1)), y.reshape(-1))
+                # view(-1, logits.size(-1)) 前一个 -1 表示由 pytorch 自行推断维度，最后一个表示最后一维度的数量
+                # 将 batch_size, seq_len, vocab_size 的结果转变为 batch_size * seq_len, vocab_size 的维度
+                
+            # backward pass process
+            # the backward pass is determined by the forward pass result
+            # so it's no need to put it in the context of mixed_precision
+            with nvtx.range("backward_pass"):
+                loss.backward()
+            torch.cuda.synchronize()  
+            time_after_backward = timeit.default_timer()
+            backward_time = time_after_backward - time_after_loss
+
+            # optimizer process
+            with nvtx.range("optimizer"):
+                optimizer.step()
+            torch.cuda.synchronize()  
+            time_after_step = timeit.default_timer()
+            optimizer_time = time_after_step - time_after_backward
+            optimizer.zero_grad()
+            torch.cuda.synchronize()  
+            # Wait for all kernels in all streams on a CUDA device to complete.
+            # In this case, the time we measured is the time of forward plus backward and optimizer update
+            nvtx.range_pop()
 
         # profiling control
         if step > warmup_steps + profiling_steps:
-            exit(0)
+            break
 
         if step > warmup_steps or args.profiling_warmup == 1:
             log_file.write(json.dumps({"step": step, "forward_time": forward_time, 
@@ -227,7 +269,12 @@ def main(args):
             log_file.flush()
 
     if memory_profiling:
-        torch.cuda.memory._record_memory_history(enabled=None)      # end the recording process
+        snapshot_file = os.path.join(
+            memory_profiling_dir,
+            f"memory_{d_model}_{context_length}_{num_layers}_{mixed_precision_re}_{run_mode}.pickle",
+        )
+        torch.cuda.memory._dump_snapshot(snapshot_file)  # save the memory usage results
+        torch.cuda.memory._record_memory_history(enabled=None)                                      # end the recording process
 
 
 if __name__ == "__main__": main(parse_args())

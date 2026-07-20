@@ -6,9 +6,9 @@ import shutil
 import subprocess
 from pathlib import Path
 from statistics import mean
-from torch.utils.checkpoint import checkpoint
 
-import pandas as pd
+
+from cs336_systems.profiling_filenames import make_profile_name
 
 
 # =========================
@@ -21,9 +21,14 @@ ROPE_THETA = 10000.0
 DTYPE = "float32"
 WARMUP_STEPS = 5
 PROFILING_STEPS = 15
+PROFILING_WARMUP = False
+PROFILE_ATTN = True
 MIXED_PRECISION = False
-MEMORY_PROFILING = True
+MEMORY_PROFILING = False
 INFERENCE_ONLY = False
+USE_JIT_COMPILER = False
+USE_CHECKPOINTS = False
+PER_CHECKPOINT_LAYERS = 1
 
 # CPU/CUDA backtraces require both perf_event_open permission and access to a
 # symbol server. Keep them disabled by default because this machine currently
@@ -63,15 +68,34 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 BENCHMARK_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def make_run_id(cfg: dict) -> str:
-    return (
-        f"d{cfg['d_model']}"
-        f"_ff{cfg['d_ff']}"
-        f"_L{cfg['num_layers']}"
-        f"_H{cfg['num_heads']}"
-        f"_ctx{cfg['context_length']}"
-        f"_bs{cfg['batch_size']}"
-    )
+def make_benchmark_args(cfg: dict) -> dict[str, object]:
+    """Return the complete benchmark CLI configuration for one run."""
+    return {
+        "vocab_size": VOCAB_SIZE,
+        "batch_size": cfg["batch_size"],
+        "context_length": cfg["context_length"],
+        "d_model": cfg["d_model"],
+        "d_ff": cfg["d_ff"],
+        "num_layers": cfg["num_layers"],
+        "num_heads": cfg["num_heads"],
+        "rope_theta": ROPE_THETA,
+        "dtype": DTYPE,
+        "warmup_steps": WARMUP_STEPS,
+        "profiling_steps": PROFILING_STEPS,
+        "profiling_warmup": int(PROFILING_WARMUP),
+        "profile_attn": int(PROFILE_ATTN),
+        "use_mixed_precision": int(MIXED_PRECISION),
+        "use_memory_profiling": int(MEMORY_PROFILING),
+        "run_mode": run_mode,
+        "use_checkpoints": int(USE_CHECKPOINTS),
+        "per_checkpoint_layers": PER_CHECKPOINT_LAYERS,
+        "use_jit_compiler": int(USE_JIT_COMPILER)
+    }
+
+
+def make_cli_args(options: dict[str, object]) -> list[str]:
+    """Convert benchmark option names and values to command-line arguments."""
+    return [item for name, value in options.items() for item in (f"--{name}", str(value))]
 
 
 def parse_python_timing(log_file: Path) -> dict:
@@ -117,16 +141,17 @@ def parse_python_timing(log_file: Path) -> dict:
     }
 
 
-def run_one_profile(cfg: dict) -> dict:
-    run_id = make_run_id(cfg)
+def run_one_profile(cfg: dict) -> None:
+    benchmark_args = make_benchmark_args(cfg)
+    run_id = make_profile_name(benchmark_args)
     report_base = REPORT_DIR / run_id
     # stdout_file = LOG_DIR / f"{run_id}.stdout.txt"
     # Isolate benchmark.py's own timing log for this run.
-    BENCHMARK_LOG_FILE = BENCHMARK_LOG_DIR / f"profiling_{cfg['d_model']}_{cfg['context_length']}_{cfg['num_layers']}_{mixed_precision_re}_{run_mode}.jsonl"
-    stderr_file = LOG_DIR / f"{run_id}.stderr_{mixed_precision_re}_{run_mode}.txt"
-    per_run_jsonl = LOG_DIR / f"{run_id}.profiling_{mixed_precision_re}_{run_mode}.jsonl"
-    if BENCHMARK_LOG_FILE.exists():
-        BENCHMARK_LOG_FILE.unlink()
+    benchmark_log_file = BENCHMARK_LOG_DIR / f"profiling_{run_id}.jsonl"
+    stderr_file = LOG_DIR / f"{run_id}.stderr.txt"
+    per_run_jsonl = LOG_DIR / f"{run_id}.profiling.jsonl"
+    if benchmark_log_file.exists():
+        benchmark_log_file.unlink()
 
     if ENABLE_BACKTRACES:
         profiling_options = [
@@ -151,7 +176,7 @@ def run_one_profile(cfg: dict) -> dict:
 
         "--trace=cuda,cudnn,cublas,osrt,nvtx",
         # "--pytorch=functions-trace,autograd-shapes-nvtx",
-        # "--cuda-memory-usage=true", 
+        "--cuda-memory-usage=true", 
 
         *profiling_options,
 
@@ -159,27 +184,7 @@ def run_one_profile(cfg: dict) -> dict:
 
         "--",
         "python", str(BENCHMARK),
-
-        "--vocab_size", str(VOCAB_SIZE),
-        "--batch_size", str(cfg["batch_size"]),
-        "--context_length", str(cfg["context_length"]),
-        "--d_model", str(cfg["d_model"]),
-        "--d_ff", str(cfg["d_ff"]),
-        "--num_layers", str(cfg["num_layers"]),
-        "--num_heads", str(cfg["num_heads"]),
-        "--rope_theta", str(ROPE_THETA),
-        "--dtype", DTYPE,
-
-        "--warmup_steps", str(WARMUP_STEPS),
-        "--profiling_steps", str(PROFILING_STEPS),
-
-        # 让模型内部 attention 相关 profiling / NVTX 标记打开，前提是你的 BasicsTransformerLM 使用了它。
-        "--profile_attn", "1",
-        "--use_mixed_precision", str(1 if MIXED_PRECISION else 0), 
-        "--use_memory_profiling", str(1 if MEMORY_PROFILING else 0), 
-        "--run_mode", run_mode, 
-        "--use_checkpoints", "1", 
-        "--per_checkpoint_layers", "1", 
+        *make_cli_args(benchmark_args),
     ]
 
     env = os.environ.copy()
@@ -193,7 +198,7 @@ def run_one_profile(cfg: dict) -> dict:
     print(f"\n========== Running {run_id} ==========")
     print(" ".join(cmd))
     with stderr_file.open("w", encoding="utf-8") as err:
-        completed = subprocess.run(
+        subprocess.run(
             cmd,
             cwd=PROJECT_ROOT,
             env=env,
@@ -201,8 +206,8 @@ def run_one_profile(cfg: dict) -> dict:
             text=True,
         )
 
-    if BENCHMARK_LOG_FILE.exists():
-        shutil.copy2(BENCHMARK_LOG_FILE, per_run_jsonl)
+    if benchmark_log_file.exists():
+        shutil.copy2(benchmark_log_file, per_run_jsonl)
 
 
 def main() -> None:

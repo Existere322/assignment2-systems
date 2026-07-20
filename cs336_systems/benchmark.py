@@ -1,15 +1,16 @@
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.optimizer import get_cosine_lr, AdamW
-from torch.utils.checkpoint import checkpoint
 import timeit
 import argparse
 import torch
 import numpy as np
 import random
-import os
 import torch.cuda.nvtx as nvtx
 import json
 from contextlib import nullcontext
+from pathlib import Path
+
+from cs336_systems.profiling_filenames import make_profile_name
 
 # CUDA_VISIBLE_DEVICES=0
 # uv run nsys profile -- python benchmark.py
@@ -79,6 +80,7 @@ def parse_args():
     g_profiling.add_argument("--run_mode", choices=["inference", "train"], default="train")
     g_profiling.add_argument("--use_checkpoints", type=int, default=0)
     g_profiling.add_argument("--per_checkpoint_layers", type=int, default=1)
+    g_profiling.add_argument("--use_jit_compiler", type=int, default=0)
 
     return p.parse_args()
     
@@ -125,11 +127,7 @@ def main(args):
     num_heads = args.num_heads
     d_ff = args.d_ff
     rope_theta = args.rope_theta
-    weight_decay = args.weight_decay
-    mixed_precision_re = "bf16" if args.use_mixed_precision == 1 else "fp32"
-    run_mode = args.run_mode
     [beta1, beta2] = args.betas
-    eps =  args.eps
     max_learning_rate = args.max_learning_rate
     device = args.device
     torch.manual_seed(args.seed)
@@ -144,6 +142,7 @@ def main(args):
     inference_only = args.run_mode == "inference"
     use_checkpoints = args.use_checkpoints == 1
     per_checkpoint_layers = args.per_checkpoint_layers
+    use_jit_compiler = args.use_jit_compiler == 1
 
     with nvtx.range("define model"):
         transformer_model = BasicsTransformerLM(vocab_size,
@@ -153,6 +152,8 @@ def main(args):
                                             rope_theta, profile_attn, 
                                             use_checkpoints, per_checkpoint_layers)
         transformer_model.to(device)
+        if use_jit_compiler:
+            transformer_model = torch.compile(transformer_model)
         if inference_only:
             transformer_model.eval()
             optimizer = None
@@ -160,7 +161,11 @@ def main(args):
             transformer_model.train()
             optimizer = AdamW(transformer_model.parameters(), args.max_learning_rate)
 
-    log_file = open(os.path.join(os.path.dirname(__file__), f"profiling_results/profiling_{d_model}_{context_length}_{num_layers}_{mixed_precision_re}_{run_mode}.jsonl"), "a")
+    run_name = make_profile_name(vars(args))
+    project_root = Path(__file__).resolve().parent
+    profiling_results_dir = project_root / "profiling_results"
+    profiling_results_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (profiling_results_dir / f"profiling_{run_name}.jsonl").open("a", encoding="utf-8")
     log_file.write(json.dumps({**vars(args)}) + "\n")
     log_file.flush()
 
@@ -173,9 +178,9 @@ def main(args):
         mixed_precision = nullcontext()
     # use nullcontext manager to determine whether use mixed_precision
 
-    memory_profiling_dir = os.path.join(os.path.dirname(__file__), "nsys_profiles", "memory_profiling")
+    memory_profiling_dir = project_root / "nsys_profiles" / "memory_profiling"
     if memory_profiling:
-        os.makedirs(memory_profiling_dir, exist_ok=True)
+        memory_profiling_dir.mkdir(parents=True, exist_ok=True)
         torch.cuda.memory._record_memory_history(max_entries=1000000)  # start recording the memory usage 
 
     for t in range(0, args.end_iter):
@@ -275,12 +280,10 @@ def main(args):
             log_file.flush()
 
     if memory_profiling:
-        snapshot_file = os.path.join(
-            memory_profiling_dir,
-            f"memory_{d_model}_{context_length}_{num_layers}_{mixed_precision_re}_{run_mode}.pickle",
-        )
-        torch.cuda.memory._dump_snapshot(snapshot_file)  # save the memory usage results
+        snapshot_file = memory_profiling_dir / f"memory_{run_name}.pickle"
+        torch.cuda.memory._dump_snapshot(str(snapshot_file))  # save the memory usage results
         torch.cuda.memory._record_memory_history(enabled=None)                                      # end the recording process
 
 
-if __name__ == "__main__": main(parse_args())
+if __name__ == "__main__":
+    main(parse_args())
